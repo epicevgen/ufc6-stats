@@ -35,6 +35,8 @@
   .sum { background: rgba(59,130,246,.08); border-radius: 10px; padding: 12px; font-size: 14px; }
   .sum .coef { margin-top: 8px; font-size: 15px; font-weight: 600; }
   .small { font-size: 12px; opacity: .65; }
+  .drill { display: flex; gap: 8px; align-items: baseline; margin: 5px 0; font-size: 14px; }
+  .drill input { flex: none; }
   .hint { font-size: 12px; opacity: .6; margin: 4px 0 0; }
 </style>
 </head>
@@ -67,6 +69,15 @@
 <p class="hint" id="notion-line"></p>
 <div class="row" id="token-row"></div>
 <p class="hint">Порядок строк = порядок экрана FIGHT STATISTICS. Tab / Enter идут КОЛОНКОЙ: весь левый боец сверху вниз, потом весь правый (как читаешь экран). Если ты на экране справа — переключи «Я: правый».</p>
+
+<h2>🏋 Дрилы <span class="small">(по сегменту, из базы «Дрилы» в Notion)</span></h2>
+<div class="row">
+  <span class="hint" id="drills-line"></span>
+  <span class="spacer"></span>
+  <button id="btn-drills">↻ Перезагрузить</button>
+</div>
+<div id="drills"></div>
+<p class="hint">Отмеченные дрилы попадут в карточку сессии при «Сохранить в Notion».</p>
 
 <h2>Бои</h2>
 <div class="row"><button class="primary" id="btn-fight">+ Добавить бой</button></div>
@@ -104,7 +115,7 @@ function newFight() { return { result: "W", side: "left", rounds: [newRound()] }
 function freshState() {
   const d = new Date();
   const iso = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-  return { date: iso, seg: "", season: "", rank: "", fights: [], notionId: "", notionUrl: "" };
+  return { date: iso, seg: "", season: "", rank: "", fights: [], drills: [], notionId: "", notionUrl: "" };
 }
 function load() {
   try {
@@ -117,6 +128,7 @@ function load() {
     if (s.rank === undefined) s.rank = "";
     if (!s.notionId) s.notionId = "";
     if (!s.notionUrl) s.notionUrl = "";
+    if (!Array.isArray(s.drills)) s.drills = [];
     s.fights = (s.fights || []).map(function (f) {
       if (!f.side || f.side !== "left" || f.side !== "right") f.side = "left";
       f.rounds = (f.rounds || []).map(function (r) {
@@ -376,7 +388,13 @@ document.getElementById("btn-new").addEventListener("click", function () {
   }
 });
 document.getElementById("date").addEventListener("input", function (e) { state.date = e.target.value; save(); });
-document.getElementById("seg").addEventListener("change", function (e) { state.seg = e.target.value; save(); });
+document.getElementById("seg").addEventListener("change", function (e) {
+  state.seg = e.target.value;
+  state.drills = []; // чек-лист дриллов привязан к сегменту
+  save();
+  loadDrills();
+});
+document.getElementById("btn-drills").addEventListener("click", function () { loadDrills(); });
 document.getElementById("season").addEventListener("input", function (e) { state.season = e.target.value; save(); });
 document.getElementById("rank").addEventListener("input", function (e) { state.rank = e.target.value; save(); });
 
@@ -407,6 +425,7 @@ function renderTokenRow() {
 }
 const NOTION = {
   dataSourceId: "2d0ad045-11fe-42fe-9630-311f821bcfda",
+  drillsDS: "41cd153b-3022-811c-b76c-000b68888923", // база «Дрилы» (data source)
   templates: {
     "Дистанция/футворк": "417d153b-3022-8039-b191-f27fd12c84e6",
     "Уклонение/оборона": "417d153b-3022-8098-94c1-de856a8e9f7b",
@@ -461,6 +480,66 @@ async function fetchTemplateChildren(id) {
     return c;
   }));
 }
+// --- дрилы из базы «Дрилы»: чек-лист по сегменту ---
+let drillItems = [];
+function renderDrills() {
+  const el = document.getElementById("drills");
+  const line = document.getElementById("drills-line");
+  el.innerHTML = "";
+  if (!drillItems.length) {
+    if (line.textContent.indexOf("…") < 0) line.textContent = state.seg ? "Нет активных дриллов в сегменте." : "";
+    return;
+  }
+  line.textContent = drillItems.length + " дриллов в «" + state.seg + "»";
+  drillItems.forEach(function (d) {
+    const label = document.createElement("label");
+    label.className = "drill";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    const saved = state.drills.filter(function (x) { return x.id === d.id; })[0];
+    cb.checked = !!(saved && saved.checked);
+    cb.addEventListener("change", function () {
+      const ex = state.drills.filter(function (x) { return x.id === d.id; })[0];
+      if (cb.checked) {
+        if (ex) ex.checked = true;
+        else state.drills.push({ id: d.id, name: d.name, time: d.time, opp: d.opp, task: d.task, checked: true });
+      } else if (ex) { ex.checked = false; }
+      save();
+    });
+    const sp = document.createElement("span");
+    sp.innerHTML = "<b>" + esc(d.name) + "</b>" + (d.time ? " (" + esc(d.time) + ")" : "") +
+      " — " + esc(d.opp) + (d.task ? ". " + esc(d.task) : "");
+    label.appendChild(cb);
+    label.appendChild(sp);
+    el.appendChild(label);
+  });
+}
+async function loadDrills() {
+  const line = document.getElementById("drills-line");
+  drillItems = [];
+  renderDrills();
+  if (!state.seg) { line.textContent = "Выбери сегмент — подтянутся дрилы этого сегмента."; return; }
+  if (!getToken()) { line.textContent = "Нет токена Notion — дрилы не загружаются (форма работает и без них)."; return; }
+  line.textContent = "Загружаем…";
+  try {
+    const q = await notionFetch("POST", "/v1/data_sources/" + NOTION.drillsDS + "/query", {
+      filter: { and: [
+        { property: "Сегмент", select: { equals: state.seg } },
+        { property: "Статус", select: { equals: "Активен" } }
+      ]},
+      page_size: 50
+    });
+    drillItems = (q.results || []).map(function (p) {
+      const pr = p.properties;
+      const rt = function (k) { return (pr[k] && pr[k].rich_text || []).map(function (t) { return t.plain_text; }).join(""); };
+      const title = (pr["Name"] && pr["Name"].title) || (pr.title && pr.title.title) || [];
+      return { id: p.id, name: title.map(function (t) { return t.plain_text; }).join(""), time: rt("Время"), opp: rt("Соперник"), task: rt("Задача") };
+    });
+    renderDrills();
+  } catch (e) {
+    line.textContent = "Не удалось загрузить дрилы: " + e.message;
+  }
+}
 function strikesText() {
   const T = sessionTotal();
   return "Твои удары: Total " + T.me.totL + "/" + T.me.totT + " (" + pct(T.me.totL, T.me.totT) + ") · Significant " + T.me.sigL + "/" + T.me.sigT + " (" + pct(T.me.sigL, T.me.sigT) + ") · KD " + T.me.kd + " · stun " + T.me.stun +
@@ -494,6 +573,21 @@ async function saveToNotion(force) {
     if (state.rank) props["Место в рейтинге"] = { number: Number(state.rank) };
     let children = [];
     try { children = await fetchTemplateChildren(NOTION.templates[state.seg]); } catch (e) { console.warn("не удалось загрузить шаблон:", e); }
+    // отмеченные дрилы — в блок 1: после разминки, перед заголовком «Блок 2»
+    const drillBlocks = state.drills.filter(function (x) { return x.checked; }).map(function (x) {
+      const t = x.name + (x.time ? " (" + x.time + ")" : "") + " — " + x.opp + (x.task ? ". " + x.task : "");
+      return { object: "block", type: "to_do", to_do: { rich_text: [{ type: "text", text: { content: t } }], checked: true } };
+    });
+    if (drillBlocks.length) {
+      let at = -1;
+      for (let i = 0; i < children.length; i++) {
+        const c = children[i];
+        if (c.type === "heading_2" && c.heading_2 && c.heading_2.rich_text &&
+            c.heading_2.rich_text.map(function (x) { return x.plain_text; }).join("").indexOf("Блок 2") >= 0) { at = i; break; }
+      }
+      const at2 = at >= 0 ? at : children.length;
+      drillBlocks.forEach(function (b, i) { children.splice(at2 + i, 0, b); });
+    }
     const page = await notionFetch("POST", "/v1/pages", { parent: { data_source_id: NOTION.dataSourceId }, properties: props, children: children });
     state.notionId = page.id; state.notionUrl = page.url; save();
     line.innerHTML = "✅ Сохранено: <a href='" + esc(page.url) + "' target='_blank'>карточка сессии</a>";
@@ -564,6 +658,7 @@ function renderAll() {
   else nl.textContent = "";
   renderTokenRow();
   renderFights();
+  loadDrills();
 }
 renderAll();
 </script>
