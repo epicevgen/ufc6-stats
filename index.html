@@ -437,6 +437,10 @@ function stripBlock(b) {
   const o = JSON.parse(JSON.stringify(b));
   delete o.id; delete o.parent_id; delete o.has_children; delete o.archived; delete o.created_time;
   delete o.last_edited_time; delete o.created_by; delete o.last_edited_by;
+  (function clean(x) { // deep-удаление null (API не принимает, напр. paragraph.icon: null)
+    if (Array.isArray(x)) x.forEach(clean);
+    else if (x && typeof x === "object") Object.keys(x).forEach(function (k) { if (x[k] === null) delete x[k]; else clean(x[k]); });
+  })(o);
   return o;
 }
 // рекурсивно копируем блоки шаблона (у таблиц дети лежат отдельным уровнем)
