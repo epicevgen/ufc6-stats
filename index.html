@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UFC6 — статистика сессии</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 760px; margin: 0 auto; padding: 16px; line-height: 1.45; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  h2 { font-size: 15px; margin: 20px 0 8px; border-top: 1px solid rgba(128,128,128,.3); padding-top: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .spacer { flex: 1; }
+  input[type=number], input[type=text], input[type=date], input[type=password] {
+    padding: 6px 8px; border: 1px solid rgba(128,128,128,.5); border-radius: 6px;
+    background: transparent; color: inherit; width: 76px; font-size: 14px;
+  }
+  input[type=date] { width: 150px; }
+  select { padding: 6px 8px; border-radius: 6px; border: 1px solid rgba(128,128,128,.5); background: transparent; color: inherit; font-size: 14px; }
+  button {
+    padding: 6px 12px; border: 1px solid rgba(128,128,128,.5); border-radius: 6px;
+    background: transparent; color: inherit; cursor: pointer; font-size: 13px;
+  }
+  button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+  button.danger { color: #ef4444; border-color: #ef444466; padding: 4px 8px; font-size: 12px; }
+  .fight { border: 1px solid rgba(128,128,128,.35); border-radius: 10px; padding: 10px 12px; margin: 10px 0; }
+  .badge { font-size: 12px; opacity: .75; }
+  .me-mark { color: #3b82f6; font-weight: 700; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+  td, th { padding: 3px 6px; text-align: center; font-size: 14px; }
+  td.lbl { text-align: left; font-size: 13px; opacity: .85; }
+  th { font-weight: 600; font-size: 13px; }
+  .round { border-left: 2px solid rgba(128,128,128,.3); padding-left: 10px; margin: 8px 0 8px 4px; }
+  .sum { background: rgba(59,130,246,.08); border-radius: 10px; padding: 12px; font-size: 14px; }
+  .sum .coef { margin-top: 8px; font-size: 15px; font-weight: 600; }
+  .small { font-size: 12px; opacity: .65; }
+  .hint { font-size: 12px; opacity: .6; margin: 4px 0 0; }
+</style>
+</head>
+<body>
+<h1>🥊 UFC6 — статистика сессии</h1>
+
+<div class="row">
+  <input type="date" id="date">
+  <select id="seg" style="width:210px">
+    <option value="">Сегмент…</option>
+    <option>Дистанция/футворк</option>
+    <option>Уклонение/оборона</option>
+    <option>Контратаки</option>
+    <option>Тейкдауны</option>
+    <option>Граунд/GI</option>
+    <option>Общеразвивающий</option>
+  </select>
+</div>
+<div class="row">
+  <input type="text" id="season" placeholder="Сезон, напр. Сезон 1 (14.11–04.12)" style="width:230px">
+  <input type="number" id="rank" placeholder="Место в рейтинге" min="0" style="width:150px">
+  <span class="spacer"></span>
+  <button id="btn-new">Новая сессия</button>
+  <button id="btn-json">Сохранить JSON</button>
+  <input type="file" id="file-import" accept=".json,application/json" hidden>
+  <button id="btn-import">📂 Загрузить JSON</button>
+  <button id="btn-notion" class="primary">💾 Сохранить в Notion</button>
+</div>
+<p class="hint" id="wl-line"></p>
+<p class="hint" id="notion-line"></p>
+<div class="row" id="token-row"></div>
+<p class="hint">Порядок строк = порядок экрана FIGHT STATISTICS. Tab / Enter идут КОЛОНКОЙ: весь левый боец сверху вниз, потом весь правый (как читаешь экран). Если ты на экране справа — переключи «Я: правый».</p>
+
+<h2>Бои</h2>
+<div class="row"><button class="primary" id="btn-fight">+ Добавить бой</button></div>
+<div id="fights"></div>
+
+<h2>Итог сессии (считается автоматически)</h2>
+<div class="sum" id="summary"></div>
+<div class="row" style="margin-top:10px">
+  <button id="copy-strikes">📋 Копировать «Удары» (для Notion)</button>
+  <button id="copy-coef">📋 Копировать индексы (AT/DR/FD)</button>
+</div>
+
+<script>
+"use strict";
+const KEY = "ufc6_session_v3";
+// порядок = порядок экрана статистики; sub: landed/thrown или landed/attempts
+const FIELDS = [
+  { key: "stun", label: "Stunned/Wobbled" },
+  { key: "body", label: "Body Health Events" },
+  { key: "legs", label: "Leg Health Events" },
+  { key: "kd",   label: "Knockdowns" },
+  { key: "sigL", label: "Significant Strikes — landed" },
+  { key: "sigT", label: "Significant Strikes — thrown" },
+  { key: "totL", label: "Total Strikes — landed" },
+  { key: "totT", label: "Total Strikes — thrown" },
+  { key: "tdL",  label: "Takedowns — landed" },
+  { key: "tdA",  label: "Takedowns — attempts" },
+  { key: "ctrl", label: "Control (мин:сек)", type: "time" },
+];
+const LAMBD = 1.2;
+
+function zeros() { const o = {}; FIELDS.forEach(function (f) { o[f.key] = f.type === "time" ? "0:00" : 0; }); return o; }
+function newRound() { return { left: zeros(), right: zeros() }; }
+function newFight() { return { result: "W", side: "left", rounds: [newRound()] }; }
+function freshState() {
+  const d = new Date();
+  const iso = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  return { date: iso, seg: "", season: "", rank: "", fights: [], notionId: "", notionUrl: "" };
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    // миграция с v2 (me/opp) и валидация структуры
+    if (!s.seg) s.seg = s.name || "";
+    if (!s.season) s.season = "";
+    if (s.rank === undefined) s.rank = "";
+    if (!s.notionId) s.notionId = "";
+    if (!s.notionUrl) s.notionUrl = "";
+    s.fights = (s.fights || []).map(function (f) {
+      if (!f.side || f.side !== "left" || f.side !== "right") f.side = "left";
+      f.rounds = (f.rounds || []).map(function (r) {
+        if (r.me && !r.left) { const left = f.side === "left" ? r.me : r.opp; const right = f.side === "left" ? r.opp : r.me; return { left: left, right: right }; }
+        if (!r.left) r.left = zeros();
+        if (!r.right) r.right = zeros();
+        FIELDS.forEach(function (fld) {
+          ["left", "right"].forEach(function (sd) {
+            if (r[sd][fld.key] === undefined || (fld.type === "time" && r[sd][fld.key] === "")) r[sd][fld.key] = fld.type === "time" ? "0:00" : 0;
+          });
+        });
+        return r;
+      });
+      if (!f.rounds.length) f.rounds = [newRound()];
+      return f;
+    });
+    return s;
+  } catch (e) { return null; }
+}
+function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+
+let state = load() || freshState();
+
+function parseCtrl(s) {
+  if (!s) return 0;
+  s = String(s).trim();
+  if (s.indexOf(":") >= 0) {
+    const p = s.split(":");
+    return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0);
+  }
+  return parseInt(s, 10) || 0;
+}
+function maskCtrl(v) {
+  let d = String(v).replace(/\D/g, "").slice(0, 4);
+  if (d.length >= 3) d = d.slice(0, -2) + ":" + d.slice(-2);
+  return d;
+}
+function fmtCtrl(sec) {
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+function pct(a, b) { return b > 0 ? Math.round(a / b * 100) + "%" : "—"; }
+
+function acc() { const o = zeros(); o.ctrl = 0; return o; } // аккумулятор: ctrl сразу в секундах
+function addSide(a, b) {
+  FIELDS.forEach(function (f) {
+    if (f.type === "time") a[f.key] = (Number(a[f.key]) || 0) + parseCtrl(b[f.key]);
+    else a[f.key] = (Number(a[f.key]) || 0) + (Number(b[f.key]) || 0);
+  });
+  return a;
+}
+function fightTotal(fight) {
+  const left = zeros(), right = zeros();
+  fight.rounds.forEach(function (r) { addSide(left, r.left); addSide(right, r.right); });
+  return fight.side === "left" ? { me: left, opp: right } : { me: right, opp: left };
+}
+function sessionTotal() {
+  const me = acc(), opp = acc();
+  state.fights.forEach(function (f) {
+    const t = fightTotal(f);
+    FIELDS.forEach(function (f2) {
+      if (f2.type === "time") { me[f2.key] += t.me[f2.key]; opp[f2.key] += t.opp[f2.key]; }
+      else { me[f2.key] += t.me[f2.key]; opp[f2.key] += t.opp[f2.key]; }
+    });
+  });
+  return { me: me, opp: opp };
+}
+
+// --- coefficient formulas (по согласованным формулам) ---
+function AT(s) {
+  const acc = Math.pow(Math.max(s.sigL / (s.sigT + 1), 0), 0.6);
+  const bonus = 1 + (s.kd + s.stun + 0.5 * s.body + 0.25 * s.legs) / (s.sigL + 1);
+  return acc * bonus * 100;
+}
+function DR(fromOpp) {
+  const a = 1 - fromOpp.sigL / (fromOpp.sigT + 1);
+  const b = 1 - (fromOpp.kd + fromOpp.stun + 0.5 * fromOpp.body + 0.25 * fromOpp.legs) / (fromOpp.sigT + 1);
+  return a * b;
+}
+function DRadj(fromOpp) {
+  return DR(fromOpp)
+    - 0.20 * fromOpp.kd / (fromOpp.sigT + 1)
+    - 0.10 * fromOpp.stun / (fromOpp.sigT + 1)
+    - 0.05 * fromOpp.body / (fromOpp.sigT + 1);
+}
+function FD(atMe, drMe, atOpp, drOpp) {
+  const a = atMe + LAMBD * drMe, b = atOpp + LAMBD * drOpp;
+  return (a + b) > 0 ? a / (a + b) : null;
+}
+function fdVerdict(fd) {
+  if (fd === null) return "";
+  if (fd >= 0.60) return "доминирование обмена";
+  if (fd >= 0.55) return "преимущество в обмене";
+  if (fd > 0.45) return "равный обмен";
+  return "проигрываешь обмен";
+}
+
+// --- rendering ---
+const elFights = document.getElementById("fights");
+const elSummary = document.getElementById("summary");
+const elWl = document.getElementById("wl-line");
+
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+function renderFights() {
+  elFights.innerHTML = "";
+  let tab = 1; // явный порядок Tab: бой → колонка целиком (сверху вниз) → следующая колонка
+  const tb = function () { return tab++; };
+  state.fights.forEach(function (fight, i) {
+    const card = document.createElement("div");
+    card.className = "fight";
+    const head = document.createElement("div");
+    head.className = "row";
+    const iAm = fight.side === "left" ? "левый" : "правый";
+    head.innerHTML =
+      "<b>Бой " + (i + 1) + "</b>" +
+      "<select data-act='result' data-i='" + i + "' tabindex='" + tb() + "'><option value='W'>W</option><option value='L'>L</option><option value='D'>D</option></select>" +
+      "<span class='badge'>Я — <select data-act='side' data-i='" + i + "' style='padding:2px 4px' tabindex='" + tb() + "'>" +
+        "<option value='left'" + (fight.side === "left" ? " selected" : "") + ">левый</option>" +
+        "<option value='right'" + (fight.side === "right" ? " selected" : "") + ">правый</option>" +
+      "</select></span>" +
+      "<span class='badge' id='badge-" + i + "'></span>" +
+      "<span class='spacer'></span>" +
+      "<button data-act='round' data-i='" + i + "'>+ раунд</button>" +
+      "<button class='danger' data-act='rmfight' data-i='" + i + "'>убрать бой</button>";
+    head.querySelector("select[data-act='result']").value = fight.result;
+    card.appendChild(head);
+
+    const leftMe = fight.side === "left";
+    const thLeft = "Левый" + (leftMe ? " <span class='me-mark'>(я)</span>" : "");
+    const thRight = "Правый" + (leftMe ? "" : " <span class='me-mark'>(я)</span>");
+
+    fight.rounds.forEach(function (rnd, r) {
+      const wrap = document.createElement("div");
+      wrap.className = "round";
+      const rhead = document.createElement("div");
+      rhead.className = "row";
+      const label = fight.rounds.length === 1 ? "Бой (весь)" : "Раунд " + (r + 1);
+      rhead.innerHTML = "<b>" + esc(label) + "</b>" +
+        (fight.rounds.length > 1 ? "<button class='danger' data-act='rmround' data-i='" + i + "' data-r='" + r + "'>× раунд</button>" : "");
+      wrap.appendChild(rhead);
+
+      // порядок Tab: ВСЯ левая колонка сверху вниз, потом ВСЯ правая
+      const tabLeft = {}, tabRight = {};
+      FIELDS.forEach(function (f) { tabLeft[f.key] = tb(); });
+      FIELDS.forEach(function (f) { tabRight[f.key] = tb(); });
+
+      let html = "<table><tr><th></th><th>" + thLeft + "</th><th>" + thRight + "</th></tr>";
+      FIELDS.forEach(function (f) {
+        const inFor = function (side, t) {
+          const v = rnd[side][f.key];
+          return f.type === "time"
+            ? "<input type='text' inputmode='numeric' placeholder='0:00' tabindex='" + t + "' data-side='" + side + "' data-f='" + f.key + "' value='" + esc(v) + "'>"
+            : "<input type='number' min='0' step='1' tabindex='" + t + "' data-side='" + side + "' data-f='" + f.key + "' value='" + esc(v) + "'>";
+        };
+        html += "<tr><td class='lbl'>" + f.label + "</td><td>" + inFor("left", tabLeft[f.key]) + "</td><td>" + inFor("right", tabRight[f.key]) + "</td></tr>";
+      });
+      html += "</table>";
+      wrap.innerHTML += html;
+      card.appendChild(wrap);
+    });
+    elFights.appendChild(card);
+  });
+  updateTotals();
+}
+
+function updateTotals() {
+  state.fights.forEach(function (f, i) {
+    const b = document.getElementById("badge-" + i);
+    if (!b) return;
+    const t = fightTotal(f);
+    b.textContent = "сиг. " + t.me.sigL + "/" + t.me.sigT + " (я) · " + t.opp.sigL + "/" + t.opp.sigT +
+      " (он) · TD " + t.me.tdL + "/" + t.me.tdA + " · ctrl " + fmtCtrl(t.me.ctrl);
+  });
+  const w = state.fights.filter(function (f) { return f.result === "W"; }).length;
+  const d = state.fights.filter(function (f) { return f.result === "D"; }).length;
+  const l = state.fights.length - w - d;
+  elWl.textContent = state.fights.length ? "В сессии: " + state.fights.length + " боёв · " + w + "W / " + l + "L / " + d + "D" : "";
+
+  const T = sessionTotal();
+  const hasData = T.me.sigT > 0 || T.opp.sigT > 0;
+  let html = "";
+  html += "<b>Твои удары:</b> Total " + T.me.totL + "/" + T.me.totT + " (" + pct(T.me.totL, T.me.totT) + ") · Significant " + T.me.sigL + "/" + T.me.sigT + " (" + pct(T.me.sigL, T.me.sigT) + ")<br>";
+  html += "<b>Чужие удары:</b> Total " + T.opp.totL + "/" + T.opp.totT + " (" + pct(T.opp.totL, T.opp.totT) + ") · Significant " + T.opp.sigL + "/" + T.opp.sigT + " (" + pct(T.opp.sigL, T.opp.sigT) + ")<br>";
+  html += "T2L: я " + T.me.tdL + "/" + T.me.tdA + " (" + pct(T.me.tdL, T.me.tdA) + ") · он " + T.opp.tdL + "/" + T.opp.tdA + " (" + pct(T.opp.tdL, T.opp.tdA) + ")<br>";
+  html += "Control: я " + fmtCtrl(T.me.ctrl) + " · он " + fmtCtrl(T.opp.ctrl) + "<br>";
+  html += "KD: " + T.me.kd + "/" + T.opp.kd + " · stun: " + T.me.stun + "/" + T.opp.stun + " · body: " + T.me.body + "/" + T.opp.body + " · legs: " + T.me.legs + "/" + T.opp.legs;
+  if (hasData) {
+    const atMe = AT(T.me), atOpp = AT(T.opp);
+    const drMe = DR(T.opp), drOpp = DR(T.me), drAdjMe = DRadj(T.opp);
+    const fd = FD(atMe, drMe, atOpp, drOpp);
+    html += "<div class='coef'>AT: я " + atMe.toFixed(1) + " · он " + atOpp.toFixed(1) +
+      "<br>DR: я " + drMe.toFixed(2) + " (adj " + drAdjMe.toFixed(2) + ") · он " + drOpp.toFixed(2) +
+      "<br>FD: " + (fd === null ? "—" : fd.toFixed(3)) + (fd === null ? "" : " → " + fdVerdict(fd)) + "</div>";
+  }
+  elSummary.innerHTML = html;
+}
+
+// --- events ---
+document.getElementById("fights").addEventListener("input", function (e) {
+  const t = e.target;
+  const f = t.dataset.f, side = t.dataset.side;
+  if (!f || !side) return;
+  if (f === "ctrl") t.value = maskCtrl(t.value);
+  const card = t.closest(".fight");
+  const idx = Array.prototype.indexOf.call(elFights.children, card);
+  const roundsEls = t.closest(".round").parentElement.querySelectorAll(".round");
+  const rIdx = Array.prototype.indexOf.call(roundsEls, t.closest(".round"));
+  state.fights[idx].rounds[rIdx][side][f] = t.value;
+  save();
+  updateTotals();
+});
+// маска mm:ss: при фокусе выделить всё, чтобы просто набрать новое значение
+document.getElementById("fights").addEventListener("focusin", function (e) {
+  const t = e.target;
+  if (t.dataset && t.dataset.f === "ctrl") t.select();
+});
+// Enter — перейти к следующему полю (вместо Tab удобнее при быстром вводе)
+document.getElementById("fights").addEventListener("keydown", function (e) {
+  if (e.key !== "Enter") return;
+  const t = e.target;
+  if (t.tagName !== "INPUT" && t.tagName !== "SELECT") return;
+  e.preventDefault();
+  const all = Array.prototype.slice.call(document.querySelectorAll("#fights input, #fights select"))
+    .sort(function (a, b) { return a.tabIndex - b.tabIndex; });
+  const i = all.indexOf(t);
+  if (i >= 0 && i < all.length - 1) all[i + 1].focus();
+});
+document.getElementById("fights").addEventListener("change", function (e) {
+  const t = e.target;
+  if (t.dataset.act === "result") {
+    state.fights[Number(t.dataset.i)].result = t.value;
+    save(); updateTotals();
+  }
+  if (t.dataset.act === "side") {
+    state.fights[Number(t.dataset.i)].side = t.value;
+    save(); renderFights();
+  }
+});
+document.getElementById("fights").addEventListener("click", function (e) {
+  const t = e.target;
+  const act = t.dataset.act, i = Number(t.dataset.i);
+  if (act === "round") { state.fights[i].rounds.push(newRound()); save(); renderFights(); }
+  if (act === "rmfight") { if (confirm("Убрать бой " + (i + 1) + "?")) { state.fights.splice(i, 1); save(); renderFights(); } }
+  if (act === "rmround") {
+    const r = Number(t.dataset.r);
+    state.fights[i].rounds.splice(r, 1);
+    save(); renderFights();
+  }
+});
+document.getElementById("btn-fight").addEventListener("click", function () {
+  state.fights.push(newFight()); save(); renderFights();
+});
+document.getElementById("btn-new").addEventListener("click", function () {
+  if (state.fights.length === 0 || confirm("Начать новую сессию? Текущие данные будут удалены.")) {
+    state = freshState(); save(); renderAll();
+  }
+});
+document.getElementById("date").addEventListener("input", function (e) { state.date = e.target.value; save(); });
+document.getElementById("seg").addEventListener("change", function (e) { state.seg = e.target.value; save(); });
+document.getElementById("season").addEventListener("input", function (e) { state.season = e.target.value; save(); });
+document.getElementById("rank").addEventListener("input", function (e) { state.rank = e.target.value; save(); });
+
+// --- сохранение в Notion (интеграция «UFC6 bot», только страница программы) ---
+// токен НЕ в коде: вводится один раз и хранится в localStorage этого браузера
+const TOKEN_KEY = "ufc6_notion_token";
+function getToken() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+function setToken(t) {
+  t = (t || "").trim();
+  try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+}
+function renderTokenRow() {
+  const row = document.getElementById("token-row");
+  if (getToken()) {
+    row.innerHTML = "<span class='hint'>🔑 Токен Notion сохранён в этом браузере</span>" +
+      "<button class='danger' id='token-clear'>сменить/удалить</button>";
+    document.getElementById("token-clear").addEventListener("click", function () {
+      if (confirm("Удалить сохранённый токен Notion из этого браузера?")) { setToken(""); renderTokenRow(); }
+    });
+  } else {
+    row.innerHTML = "<input type='password' id='token-in' placeholder='Токен Notion (ntn_…)' style='width:260px'>" +
+      "<button id='token-save'>Сохранить токен</button>";
+    document.getElementById("token-save").addEventListener("click", function () {
+      const v = document.getElementById("token-in").value.trim();
+      if (v) { setToken(v); renderTokenRow(); }
+    });
+  }
+}
+const NOTION = {
+  dataSourceId: "2d0ad045-11fe-42fe-9630-311f821bcfda",
+  templates: {
+    "Дистанция/футворк": "417d153b-3022-8039-b191-f27fd12c84e6",
+    "Уклонение/оборона": "417d153b-3022-8098-94c1-de856a8e9f7b",
+    "Контратаки": "417d153b-3022-80b9-b2e5-f37bcd3bf48c",
+    "Тейкдауны": "417d153b-3022-801b-a9ee-f12f402ae792",
+    "Граунд/GI": "417d153b-3022-80c7-9166-c2ff49c4fd5d",
+    "Общеразвивающий": "417d153b-3022-8089-ae89-dd0282b2ba54"
+  }
+};
+async function notionFetch(method, path, body) {
+  const token = getToken();
+  if (!token) throw new Error("нет токена Notion — введи его в поле под кнопками (сохранится в этом браузере)");
+  const res = await fetch("https://api.notion.com" + path, {
+    method: method,
+    headers: {
+      Authorization: "Bearer " + token,
+      "Notion-Version": "2026-03-11",
+      "Content-Type": "application/json"
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (res.status === 429) { await new Promise(function (r) { setTimeout(r, 1500); }); return notionFetch(method, path, body); }
+  const json = await res.json();
+  if (!res.ok) throw new Error("Notion " + res.status + ": " + ((json.message) || "ошибка"));
+  return json;
+}
+function stripBlock(b) {
+  const o = JSON.parse(JSON.stringify(b));
+  delete o.id; delete o.parent_id; delete o.has_children; delete o.archived; delete o.created_time;
+  delete o.last_edited_time; delete o.created_by; delete o.last_edited_by;
+  return o;
+}
+// рекурсивно копируем блоки шаблона (у таблиц дети лежат отдельным уровнем)
+async function fetchTemplateChildren(id) {
+  const list = await notionFetch("GET", "/v1/blocks/" + id + "/children?page_size=100");
+  return Promise.all((list.results || []).map(async function (b) {
+    const c = stripBlock(b);
+    if (b.has_children) c.children = await fetchTemplateChildren(b.id);
+    return c;
+  }));
+}
+function strikesText() {
+  const T = sessionTotal();
+  return "Твои удары: Total " + T.me.totL + "/" + T.me.totT + " (" + pct(T.me.totL, T.me.totT) + ") · Significant " + T.me.sigL + "/" + T.me.sigT + " (" + pct(T.me.sigL, T.me.sigT) + ") · KD " + T.me.kd + " · stun " + T.me.stun +
+    "\nЧужие удары: Total " + T.opp.totL + "/" + T.opp.totT + " (" + pct(T.opp.totL, T.opp.totT) + ") · Significant " + T.opp.sigL + "/" + T.opp.sigT + " (" + pct(T.opp.sigL, T.opp.sigT) + ") · KD " + T.opp.kd + " · stun " + T.opp.stun;
+}
+async function saveToNotion(force) {
+  if (!state.fights.length) { alert("Сначала добавь хотя бы один бой."); return; }
+  if (!state.seg || !NOTION.templates[state.seg]) { alert("Выбери сегмент (шаблон карточки)."); return; }
+  if (state.notionId && !force && !confirm("Сессия уже сохранена (есть ссылка ниже). Создать ЕЩЁ ОДНУ карточку?")) return;
+  const btn = document.getElementById("btn-notion");
+  btn.disabled = true; btn.textContent = "Сохраняем…";
+  const line = document.getElementById("notion-line");
+  try {
+    const T = sessionTotal();
+    const atMe = AT(T.me), drMe = DR(T.opp);
+    const fd = FD(atMe, drMe, AT(T.opp), DR(T.me));
+    const w = state.fights.filter(function (f) { return f.result === "W"; }).length;
+    const d = state.fights.filter(function (f) { return f.result === "D"; }).length;
+    const l = state.fights.length - w - d;
+    const props = {
+      "Сессия": { title: [{ text: { content: state.seg + " · " + state.date } }] },
+      "Дата": { date: { start: state.date } },
+      "W/L": { rich_text: [{ text: { content: w + "W/" + l + "L/" + d + "D" } }] },
+      "Удары": { rich_text: [{ text: { content: strikesText() } }] },
+      "AT": { number: Math.round(atMe * 10) / 10 },
+      "DR": { number: Math.round(drMe * 100) / 100 },
+      "FD": { number: fd === null ? null : Math.round(fd * 1000) / 1000 },
+      "T2L": { rich_text: [{ text: { content: T.me.tdL + "/" + T.me.tdA + " (я) · " + T.opp.tdL + "/" + T.opp.tdA + " (он) · Control я " + fmtCtrl(T.me.ctrl) + " · он " + fmtCtrl(T.opp.ctrl) } }] }
+    };
+    if (state.season) props["Сезон"] = { rich_text: [{ text: { content: state.season } }] };
+    if (state.rank) props["Место в рейтинге"] = { number: Number(state.rank) };
+    let children = [];
+    try { children = await fetchTemplateChildren(NOTION.templates[state.seg]); } catch (e) { console.warn("не удалось загрузить шаблон:", e); }
+    const page = await notionFetch("POST", "/v1/pages", { parent: { data_source_id: NOTION.dataSourceId }, properties: props, children: children });
+    state.notionId = page.id; state.notionUrl = page.url; save();
+    line.innerHTML = "✅ Сохранено: <a href='" + esc(page.url) + "' target='_blank'>карточка сессии</a>";
+    btn.textContent = "Сохранить ещё раз (новая карточка)";
+  } catch (e) {
+    line.textContent = "❌ Не сохранилось: " + e.message + " — запасной вариант: кнопки «Копировать» ниже.";
+  }
+  btn.disabled = false;
+}
+document.getElementById("btn-notion").addEventListener("click", function () { saveToNotion(false); });
+
+function copyText(label, text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () { alert(label + " — скопировано в буфер."); }, function () { window.prompt(label + " — скопируй вручную:", text); });
+  } else { window.prompt(label + " — скопируй вручную:", text); }
+}
+document.getElementById("copy-strikes").addEventListener("click", function () {
+  copyText("Колонка «Удары»", strikesText());
+});
+document.getElementById("copy-coef").addEventListener("click", function () {
+  const T = sessionTotal();
+  if (T.me.sigT === 0 && T.opp.sigT === 0) { alert("Нет данных."); return; }
+  const atMe = AT(T.me), atOpp = AT(T.opp), drMe = DR(T.opp), drAdjMe = DRadj(T.opp), drOpp = DR(T.me);
+  const fd = FD(atMe, drMe, atOpp, drOpp);
+  const w = state.fights.filter(function (f) { return f.result === "W"; }).length;
+  const d = state.fights.filter(function (f) { return f.result === "D"; }).length;
+  const l = state.fights.length - w - d;
+  const text = "AT " + atMe.toFixed(1) + " (он " + atOpp.toFixed(1) + ") · DR " + drMe.toFixed(2) + " (adj " + drAdjMe.toFixed(2) + ") · FD " + (fd === null ? "—" : fd.toFixed(3)) +
+    " · T2L " + pct(T.me.tdL, T.me.tdA) + " (" + T.me.tdL + "/" + T.me.tdA + ") · Control " + fmtCtrl(T.me.ctrl) + " · " + w + "W/" + l + "L/" + d + "D";
+  copyText("Индексы сессии", text);
+});
+document.getElementById("btn-json").addEventListener("click", function () {
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "ufc6-session-" + state.date + ".json";
+  a.click();
+});
+// импорт: перенос сессии между устройствами (на второе устройство «Загрузить JSON»)
+document.getElementById("btn-import").addEventListener("click", function () {
+  document.getElementById("file-import").click();
+});
+document.getElementById("file-import").addEventListener("change", function (e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function () {
+    try {
+      const s = JSON.parse(reader.result);
+      if (!s || !s.date || !Array.isArray(s.fights)) throw new Error("файл не похож на сессию (нет date/fights)");
+      if (!confirm("Заменить текущую сессию файлом от " + s.date + "? Текущие данные в этом браузере будут удалены.")) return;
+      localStorage.setItem(KEY, reader.result);
+      state = load() || freshState(); // load() прогонит миграции и валидацию
+      renderAll();
+    } catch (err) { alert("Не удалось загрузить JSON: " + err.message); }
+    e.target.value = "";
+  };
+  reader.readAsText(file);
+});
+
+function renderAll() {
+  document.getElementById("date").value = state.date;
+  document.getElementById("seg").value = NOTION.templates[state.seg] ? state.seg : "";
+  document.getElementById("season").value = state.season;
+  document.getElementById("rank").value = state.rank;
+  const nl = document.getElementById("notion-line");
+  if (state.notionUrl) nl.innerHTML = "✅ Сохранено: <a href='" + esc(state.notionUrl) + "' target='_blank'>карточка сессии</a>";
+  else nl.textContent = "";
+  renderTokenRow();
+  renderFights();
+}
+renderAll();
+</script>
+</body>
+</html>
