@@ -443,10 +443,19 @@ function stripBlock(b) {
   })(o);
   return o;
 }
+// пустые/пробельные блоки из шаблона (напр. пустые пункты 1./2./3.) не копируем
+function isEmptyBlock(b) {
+  if (b.has_children) return false;
+  const t = b[b.type];
+  if (!t) return false;
+  const rt = t.rich_text || t.text;
+  if (!rt || !rt.length) return false;
+  return rt.every(function (x) { return !(x.plain_text || "").trim(); });
+}
 // рекурсивно копируем блоки шаблона (у таблиц дети лежат отдельным уровнем)
 async function fetchTemplateChildren(id) {
   const list = await notionFetch("GET", "/v1/blocks/" + id + "/children?page_size=100");
-  return Promise.all((list.results || []).map(async function (b) {
+  return Promise.all((list.results || []).filter(function (b) { return !isEmptyBlock(b); }).map(async function (b) {
     const c = stripBlock(b);
     if (b.has_children) c.children = await fetchTemplateChildren(b.id);
     return c;
